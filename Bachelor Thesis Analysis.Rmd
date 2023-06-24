@@ -1,0 +1,310 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(brms)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(bayesplot)
+library(loo)
+library(gridExtra)
+library(grid)
+library(ggstance)
+```
+```{r}
+# The files freqs-1.tsv, freqs-2.tsv and processed_wordinfo.tsv are from Futrell et al. (2021)
+word_freqs <- read.table("freqs-1.tsv", sep="\t",header=F,col.names = c("token_code","order","token","freqUnigram","freqPrev"),quote="")
+
+bigram_freqs <- read.table("freqs-2.tsv", sep="\t",header=F,col.names = c("token_code","order","token","freqBigram","freqPrev"),quote="")
+
+reading_times <- read.table("processed_wordinfo.tsv",sep="\t",header=T,quote="")
+```
+```{r}
+
+# Word frequencies.
+freqs_uni <- word_freqs %>%
+  separate(col = token_code,into=c("Story","Position","Type"),sep="[.]") %>%
+  filter(Type == "word") %>%
+  select(-c(Type,order,freqPrev)) %>%
+  mutate(logFreq=log(freqUnigram),Position = as.integer(Position),Story = as.integer(Story))
+
+# Bigram frequencies are processed intro bigram probabilities and further into log-probabilities.
+freqs_bi <- bigram_freqs %>%
+  separate(col = token_code,into=c("Story","Position","Type"),sep="[.]") %>%
+  filter(Type == "word") %>%
+  select(-c(Type,order)) %>%
+  mutate(bigram_prob = freqBigram/freqPrev, Position = as.integer(Position),Story = as.integer(Story)) %>%
+  mutate(log_bigram_prob = log(bigram_prob))
+  
+# The frequency tables are combined
+freqs_bi <- inner_join(freqs_uni,freqs_bi,by=c("Position","Story","token"))
+
+# The frequency table is combined with the reading time data, word length is added and NA's are excluded.
+data <- freqs_bi %>%
+  inner_join(reading_times,by=c("Position" = "zone","Story" = "item")) %>%
+  select(-c(nItem,word)) %>%
+  mutate(word_length = nchar(token)) %>%
+  mutate(log_bigram_prob = freqs_bi$log_bigram_prob) %>%
+  na.omit()
+
+
+# Remove rows with bigram counts of 0 (leads to log probs of -inf)
+data <- data %>% filter(!is.infinite(log_bigram_prob))
+```
+
+```{r}
+# brms formula to be used
+formula <- brmsformula(meanItemRT ~ logFreq + log_bigram_prob + word_length + (1 | Story) + (1 | Position))
+```
+
+```{r}
+# Get parameters which need priors.
+# Lognormal priors
+gpriors_ln <- get_prior(formula,
+             data = data,
+             family = lognormal())
+```
+```{r}
+# Shifted lognormal priors
+gpriors_sln <- get_prior(formula,
+             data = data,
+             family = shifted_lognormal())
+```
+```{r}
+# Wald (inverse gaussian) priors
+gpriors_wald <- get_prior(formula,
+             data = data,
+             family = inverse.gaussian())
+```
+```{r}
+# Weibull priors
+gpriors_weibull <- get_prior(formula,
+                             data = data,
+                             family = weibull())
+```
+```{r}
+# Exgaussian (Exponentially modified gaussian) priors
+gpriors_emg <- get_prior(formula,
+                         data = data,
+                         family = exgaussian())
+```
+
+```{r}
+# The "standard" priors are printed.
+gpriors_ln
+gpriors_sln
+gpriors_wald
+gpriors_weibull
+gpriors_emg
+```
+
+```{r}
+# We use uninformative priors for each model.
+
+# Priors for lognormal family
+priors_ln <- c(
+  prior(student_t(3, 5.8, 2.5), class = Intercept),
+  prior(normal(0, 1), class = b),
+  prior(student_t(3, 0, 2.5),class = sd,lb=0),
+  prior(student_t(3,0,2.5), class = sigma,lb=0)
+)
+
+# Priors for shifted lognormal family
+priors_sln <- c(
+  prior(student_t(3, 5.8, 2.5), class = Intercept),
+  prior(normal(0, 1), class = b),
+  prior(student_t(3, 5, 2.5), class = sigma,lb=0),
+  prior(student_t(3, 0, 2.5),class = sd,lb=0),
+  prior(student_t(3,0,2.5), class = ndt)
+)
+
+# Priors for Wald family
+priors_wald <- c(
+  prior(student_t(3, 5.8, 2.5), class = Intercept),
+  prior(normal(0, 1), class = b),
+  prior(cauchy(0,10), class = shape,lb=0.001,ub=100),
+  prior(student_t(3, 0, 2.5),class = sd,lb=0.001,ub=100)
+)
+
+# Priors for Weibull family
+priors_weibull <- c(
+  prior(student_t(3, 5.8, 2.5), class = Intercept),
+  prior(normal(0, 1), class = b),
+  prior(cauchy(0,10), class = shape,lb=0),
+  prior(student_t(3, 0, 2.5),class = sd,lb=0)
+)
+
+# Priors for Exgaussian family
+priors_emg <- c(
+  prior(student_t(3, 5.8, 2.5), class = Intercept),
+  prior(normal(0, 1), class = b),
+  prior(student_t(3, 5, 2.5), class = sigma,lb=0),
+  prior(student_t(3, 0, 2.5),class = sd,lb=0),
+  prior(gamma(1, 0.1),class = beta,lb=0)
+)
+
+```
+```{r}
+# We fit the lognormal bayesian model
+ln_model <- brm(formula,
+             data = data,
+             family = lognormal(),
+             prior = priors_ln,
+             file = "ln_model")
+```
+```{r}
+# We fit the shifted lognormal bayesian model
+sln_model <- brm(formula,
+             data = data,
+             family = shifted_lognormal(),
+             prior = priors_sln,
+             file = "sln_model")
+```
+```{r}
+#We fit the Wald model
+wald_model <- brm(formula,
+             data = data,
+             family = inverse.gaussian("log"),
+             prior = priors_wald,
+             file = "wald_model")
+```
+```{r}
+#We fit the Weibull model
+weibull_model <- brm(formula,
+             data = data,
+             family = weibull(),
+             prior = priors_weibull,
+             file = "weibull_model")
+```
+```{r}
+#We fit the exgaussian model
+emg_model <- brm(formula,
+                 data = data,
+                 family = exgaussian(),
+                 prior = priors_emg,
+                 file = "emg_model")
+```
+
+```{r}
+# Posterior predictive checks
+grid.arrange(
+(pp_check(ln_model,ndraws=10) + ggtitle("Lognormal model")), 
+(pp_check(sln_model,ndraws=10) + ggtitle("Shifted lognormal model")),
+(pp_check(wald_model,ndraws=10) + ggtitle("Wald model")),
+(pp_check(weibull_model,ndraws=10) + ggtitle("Weibull model")),
+(pp_check(emg_model,ndraws=10) + ggtitle("EMG model")),
+top = textGrob("Posterior predictive checks")
+)
+```
+
+```{r}
+# Loo and waic metrics are computed for each model
+ln_model <- add_criterion(ln_model,c("waic","loo"))
+sln_model <- add_criterion(sln_model,c("waic","loo"))
+weibull_model <- add_criterion(weibull_model,c("waic","loo"))
+wald_model <- add_criterion(wald_model,c("waic","loo"))
+emg_model <- add_criterion(emg_model,c("waic","loo"))
+```
+
+```{r}
+# Plot the elpd scores obtained with loo
+models = list(ln_model,sln_model,weibull_model,emg_model,wald_model)
+elpds <- sapply(models, function(x) x$criteria$loo$elpd_loo)
+names = c("Lognormal","Shifted Lognormal","Weibull","EMG","Wald")
+ses <- sapply(models, function(x) x$criteria$loo$se_elpd_loo)
+loo_plot <- ggplot(mapping = aes(x = elpds,y=names)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin=elpds-ses, xmax=elpds+ses), height=0.2) +
+  xlab("Expected log pointwise predictive density (elpd)") +
+  ylab("Model") +
+  ggtitle("Comparison of LOOCV estimates")
+
+```
+```{r}
+# Plot the elpd scores obtained with WAIC
+models = list(ln_model,sln_model,weibull_model,emg_model,wald_model)
+waic_elpds <- sapply(models, function(x) x$criteria$waic$elpd_waic)
+names = c("Lognormal","Shifted Lognormal","Weibull","EMG","Wald")
+ses <- sapply(models, function(x) x$criteria$waic$se_elpd_waic)
+waic_plot <- ggplot(mapping = aes(x = waic_elpds,y=names)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin=waic_elpds-ses, xmax=waic_elpds+ses), height=0.2) +
+  xlab("Expected log pointwise predictive density (elpd)") +
+  ylab("Model") +
+  ggtitle("Comparison of WAIC estimates")
+
+```
+```{r}
+# Combine LOO and WAIC plots.
+grid.arrange(loo_plot,waic_plot)
+```
+```{r}
+# Plotting the intercepts of the predictors for each model
+getPosteriorPlot <- function(model,pars) {
+  mcmc_intervals(model,pars = pars) + ggtitle(model$family$family)
+plots <- lapply(models,getPosteriorPlot,pars = c("b_logFreq","b_log_bigram_prob", "b_word_length"))
+} 
+grid.arrange(grobs = plots)
+```
+
+
+```{r}
+# Plotting model specific parameters
+# Lognormal model:
+ln_arrange <- grid.arrange(
+  mcmc_dens(ln_model,pars=c("b_Intercept")),
+  mcmc_dens(ln_model,pars=c("sigma")),
+  top = "Lognormal model-specific parameters"
+)
+```
+```{r}
+# Shifted lognormal model:
+model <- sln_model
+sln_arrange <- grid.arrange(
+  mcmc_dens(model,pars=c("b_Intercept")),
+  mcmc_dens(model,pars=c("sigma")),
+  (mcmc_dens(model,pars=c("ndt")) + xlab("shift (ms)")),
+  top = "Shifted lognormal model-specific parameters"
+)
+```
+```{r}
+# Weibull model:
+model <- weibull_model
+weibull_arrange <- grid.arrange(
+  mcmc_dens(model,pars=c("b_Intercept")),
+  mcmc_dens(model,pars=c("shape")),
+  top = "Weibull model-specific parameters"
+)
+```
+```{r}
+# EMG model:
+model <- emg_model
+emg_arrange <- grid.arrange(
+  mcmc_dens(model,pars=c("b_Intercept")),
+  mcmc_dens(model,pars=c("sigma")),
+  mcmc_dens(model,pars=c("beta")),
+  top = "EMG model-specific parameters"
+)
+```
+```{r}
+# Wald model:
+model <- wald_model
+wald_arrange <- grid.arrange(
+  mcmc_dens(model,pars=c("b_Intercept")),
+  mcmc_dens(model,pars=c("shape")),
+  top = "Wald model-specific parameters"
+)
+```
+```{r}
+# PLOT THEM ALL!
+grid.arrange(ln_arrange)
+grid.arrange(sln_arrange)
+grid.arrange(weibull_arrange)
+grid.arrange(emg_arrange)
+grid.arrange(wald_arrange)
+```
+
