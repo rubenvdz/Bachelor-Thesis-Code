@@ -207,6 +207,8 @@ ln_model <- add_criterion(ln_model,c("waic","loo"))
 sln_model <- add_criterion(sln_model,c("waic","loo"))
 weibull_model <- add_criterion(weibull_model,c("waic","loo"))
 wald_model <- add_criterion(wald_model,c("waic","loo"))
+```
+```{r}
 emg_model <- add_criterion(emg_model,c("waic","loo"))
 ```
 
